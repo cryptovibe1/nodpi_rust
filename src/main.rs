@@ -133,33 +133,33 @@ impl ProxyServer {
         }
         println!(
             "\n\
-\033[92m`7MN.   `7MF'          `7MM\"\"\"Yb.   `7MM\"\"\"Mq. `7MMF'\n\
+\x1b[92m`7MN.   `7MF'          `7MM\"\"\"Yb.   `7MM\"\"\"Mq. `7MMF'\n\
   MMN.    M              MM    `Yb.   MM   `MM.  MM\n\
   M YMb   M   ,pW\"Wq.    MM     `Mb   MM   ,M9   MM\n\
   M  `MN. M  6W'   `Wb   MM      MM   MMmmdM9    MM\n\
   M   `MM.M  8M     M8   MM     ,MP   MM         MM\n\
   M     YMM  YA.   ,A9   MM    ,dP'   MM         MM\n\
-.JML.    YM   `Ybmd9'  .JMMmmmdP'   .JMML.     .JMML.\033[0m\n"
+.JML.    YM   `Ybmd9'  .JMMmmmdP'   .JMML.     .JMML.\x1b[0m\n"
         );
-        println!("\033[92mVersion: {}\033[0m", VERSION);
+        println!("\x1b[92mVersion: {}\x1b[0m", VERSION);
         println!(
-            "\033[97mEnjoy watching! / Наслаждайтесь просмотром!\033[0m"
+            "\x1b[97mEnjoy watching! / Наслаждайтесь просмотром!\x1b[0m"
         );
         println!(
             "Proxy is running on {}:{}",
             self.host, self.port
         );
-        println!("\n\033[92m[INFO]:\033[97m Proxy started at {}\033[0m", Local::now().format("%Y-%m-%d %H:%M:%S"));
+        println!("\n\x1b[92m[INFO]:\x1b[97m Proxy started at {}\x1b[0m", Local::now().format("%Y-%m-%d %H:%M:%S"));
         if !self.no_blacklist {
             println!(
-                "\033[92m[INFO]:\033[97m Blacklist contains {} domains\033[0m",
+                "\x1b[92m[INFO]:\x1b[97m Blacklist contains {} domains\x1b[0m",
                 self.blacklist.len()
             );
         }
-        println!("\033[92m[INFO]:\033[97m To stop the proxy, press Ctrl+C twice\033[0m");
+        println!("\x1b[92m[INFO]:\x1b[97m To stop the proxy, press Ctrl+C twice\x1b[0m");
         if let Some(path) = &self.log_error {
             println!(
-                "\033[92m[INFO]:\033[97m Logging is in progress. You can see the list of errors in the file {}\033[0m",
+                "\x1b[92m[INFO]:\x1b[97m Logging is in progress. You can see the list of errors in the file {}\x1b[0m",
                 path
             );
         }
@@ -182,7 +182,7 @@ impl ProxyServer {
         loop {
             tokio::select! {
                 _ = shutdown.notified() => {
-                    self.print("\n\n\033[92m[INFO]:\033[97m Shutting down proxy...\033[0m");
+                    self.print("\n\n\x1b[92m[INFO]:\x1b[97m Shutting down proxy...\x1b[0m");
                     break;
                 }
                 res = listener.accept() => {
@@ -518,14 +518,14 @@ impl ProxyServer {
                     last_out = curr_out;
 
                     let stats = format!(
-                        "\r\033[92m[STATS]:\033[0m \
-\033[97mConns: \033[93m{}\033[0m | \
-\033[97mMiss: \033[92m{}\033[0m | \
-\033[97mUnblock: \033[91m{}\033[0m | \
-\033[97mDL: \033[96m{}\033[0m | \
-\033[97mUL: \033[96m{}\033[0m | \
-\033[97mSpeed DL: \033[96m{}\033[0m | \
-\033[97mSpeed UL: \033[96m{}\033[0m",
+                        "\r\x1b[92m[STATS]:\x1b[0m \
+\x1b[97mConns: \x1b[93m{}\x1b[0m | \
+\x1b[97mMiss: \x1b[92m{}\x1b[0m | \
+\x1b[97mUnblock: \x1b[91m{}\x1b[0m | \
+\x1b[97mDL: \x1b[96m{}\x1b[0m | \
+\x1b[97mUL: \x1b[96m{}\x1b[0m | \
+\x1b[97mSpeed DL: \x1b[96m{}\x1b[0m | \
+\x1b[97mSpeed UL: \x1b[96m{}\x1b[0m",
                         self.total_connections.load(Ordering::Relaxed),
                         self.allowed_connections.load(Ordering::Relaxed),
                         self.blocked_connections.load(Ordering::Relaxed),
@@ -749,11 +749,11 @@ fn manage_autostart(install: bool) -> Result<(), String> {
         if install {
             key.set_value(app_name, &command)
                 .map_err(|e| format!("[ERROR]: Autostart operation failed: {}", e))?;
-            println!("\033[92m[INFO]:\033[97m Added to autostart: {}", exe_path.to_string_lossy());
+            println!("\x1b[92m[INFO]:\x1b[97m Added to autostart: {}", exe_path.to_string_lossy());
         } else {
             match key.delete_value(app_name) {
-                Ok(()) => println!("\033[92m[INFO]:\033[97m Removed from autostart"),
-                Err(_) => println!("\033[91m[ERROR]: Not found in autostart\033[0m"),
+                Ok(()) => println!("\x1b[92m[INFO]:\x1b[97m Removed from autostart"),
+                Err(_) => println!("\x1b[91m[ERROR]: Not found in autostart\x1b[0m"),
             }
         }
 
@@ -773,7 +773,7 @@ async fn main() {
 
     if args.install || args.uninstall {
         if let Err(err) = manage_autostart(args.install) {
-            eprintln!("\033[91m[ERROR]:\033[97m {}", err);
+            eprintln!("\x1b[91m[ERROR]:\x1b[97m {}", err);
             std::process::exit(1);
         }
         return;
@@ -782,7 +782,7 @@ async fn main() {
     let server = match ProxyServer::new(&args) {
         Ok(s) => Arc::new(s),
         Err(err) => {
-            eprintln!("\033[91m[ERROR]:\033[97m {}\033[0m", err);
+            eprintln!("\x1b[91m[ERROR]:\x1b[97m {}\x1b[0m", err);
             return;
         }
     };
