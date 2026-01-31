@@ -21,6 +21,9 @@ use winreg::enums::*;
 #[cfg(windows)]
 use winreg::RegKey;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use sha2::{Digest, Sha256};
+
 const VERSION: &str = "2.1";
 const UPDATE_URL: &str = "https://gvcoder09.github.io/nodpi_site/api/v1/update_info.json";
 
@@ -49,12 +52,19 @@ struct Config {
     no_blacklist: bool,
     auto_blacklist: bool,
     quiet: bool,
+    auth_user: Option<String>,
+    auth_pass: Option<String>,
+    check_updates: bool,
+    users_file: Option<String>,
+    users: Option<Arc<HashMap<String, String>>>,
 }
 
 struct Args {
     config: Config,
     install: bool,
     uninstall: bool,
+    add_user: Option<String>,
+    add_pass: Option<String>,
 }
 
 struct Logger {
@@ -221,53 +231,53 @@ impl Statistics {
 
     async fn get_stats_display(&self) -> String {
         let state = self.inner.lock().await;
-        let col_width = 30usize;
+        let col_width = 17usize;
 
         let conns_stat = format!(
             "\x1b[97mTotal: \x1b[93m{}\x1b[0m",
             state.total_connections
         )
-        .ljust(col_width)
+        .pad_ansi(col_width)
             + "\x1b[97m| "
             + format!(
                 "\x1b[97mMiss: \x1b[96m{}\x1b[0m",
                 state.allowed_connections
             )
-            .ljust(col_width)
+            .pad_ansi(col_width)
             .as_str()
             + "\x1b[97m| "
             + format!(
                 "\x1b[97mUnblock: \x1b[92m{}\x1b[0m",
                 state.blocked_connections
             )
-            .ljust(col_width)
+            .pad_ansi(col_width)
             .as_str()
             + "\x1b[97m| "
             + format!(
                 "\x1b[97mErrors: \x1b[91m{}\x1b[0m",
                 state.errors_connections
             )
-            .ljust(col_width)
+            .pad_ansi(col_width)
             .as_str();
 
         let traffic_stat = format!(
             "\x1b[97mTotal: \x1b[96m{}\x1b[0m",
             format_size(state.traffic_out + state.traffic_in)
         )
-        .ljust(col_width)
+        .pad_ansi(col_width)
             + "\x1b[97m| "
             + format!(
                 "\x1b[97mDL: \x1b[96m{}\x1b[0m",
                 format_size(state.traffic_in)
             )
-            .ljust(col_width)
+            .pad_ansi(col_width)
             .as_str()
             + "\x1b[97m| "
             + format!(
                 "\x1b[97mUL: \x1b[96m{}\x1b[0m",
                 format_size(state.traffic_out)
             )
-            .ljust(col_width)
+            .pad_ansi(col_width)
             .as_str()
             + "\x1b[97m| ";
 
@@ -286,27 +296,27 @@ impl Statistics {
             "\x1b[97mDL: \x1b[96m{}\x1b[0m",
             format_speed(state.speed_in)
         )
-        .ljust(col_width)
+        .pad_ansi(col_width)
             + "\x1b[97m| "
             + format!(
                 "\x1b[97mUL: \x1b[96m{}\x1b[0m",
                 format_speed(state.speed_out)
             )
-            .ljust(col_width)
+            .pad_ansi(col_width)
             .as_str()
             + "\x1b[97m| "
             + format!(
                 "\x1b[97mAVG DL: \x1b[96m{}\x1b[0m",
                 format_speed(avg_speed_in)
             )
-            .ljust(col_width)
+            .pad_ansi(col_width)
             .as_str()
             + "\x1b[97m| "
             + format!(
                 "\x1b[97mAVG UL: \x1b[96m{}\x1b[0m",
                 format_speed(avg_speed_out)
             )
-            .ljust(col_width)
+            .pad_ansi(col_width)
             .as_str();
 
         let title = "STATISTICS";
@@ -368,8 +378,7 @@ impl BlacklistManager {
                 }
             }
 
-            let client = match Client::builder()
-                .danger_accept_invalid_certs(true)
+        let client = match Client::builder()
                 .timeout(Duration::from_secs(4))
                 .user_agent("Mozilla/5.0")
                 .build()
@@ -442,13 +451,18 @@ impl ConnectionHandler {
         }
 
         let http_data = buf[..n].to_vec();
-        let (method, host, port) = match parse_http_request(&http_data) {
+        let (method, host, port, headers) = match parse_http_request(&http_data) {
             Ok(v) => v,
             Err(err) => {
                 self.handle_connection_error(&mut client, &peer, err).await;
                 return;
             }
         };
+
+        if !is_auth_ok(&self.config, &headers) {
+            self.handle_auth_required(&mut client).await;
+            return;
+        }
 
         if method == "CONNECT" {
             self.blacklist_manager.check_domain(&host).await;
@@ -579,7 +593,7 @@ impl ConnectionHandler {
 
         let parts = match self.config.fragment_method {
             FragmentMethod::Random => fragment_random(&data),
-            FragmentMethod::Sni => fragment_sni(&data),
+            FragmentMethod::Sni => fragment_sni(&data).unwrap_or_else(|| fragment_random(&data)),
         };
 
         writer.write_all(&parts).await?;
@@ -650,6 +664,15 @@ impl ConnectionHandler {
             );
             self.logger.log_access(&line).await;
         }
+    }
+
+    async fn handle_auth_required(&self, writer: &mut TcpStream) {
+        let response = b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"NoDPI\"\r\nContent-Length: 0\r\n\r\n";
+        let _ = writer.write_all(response).await;
+        self.statistics.update_traffic(response.len() as u64, 0).await;
+        self.statistics.increment_total_connections().await;
+        self.statistics.increment_error_connections().await;
+        self.logger.log_error("Proxy authentication required").await;
     }
 
     async fn update_conn_in(&self, conn_key: &str, n: u64) {
@@ -768,7 +791,7 @@ impl ProxyServer {
     }
 
     async fn check_for_updates(&self) -> Option<String> {
-        if self.config.quiet {
+        if self.config.quiet || !self.config.check_updates {
             return None;
         }
         let client = Client::builder()
@@ -971,7 +994,7 @@ impl ProxyServer {
 
 }
 
-fn parse_http_request(data: &[u8]) -> Result<(String, String, u16), String> {
+fn parse_http_request(data: &[u8]) -> Result<(String, String, u16, Vec<(String, String)>), String> {
     let headers: Vec<&[u8]> = data.split(|b| *b == b'\n').collect();
     if headers.is_empty() {
         return Err("Missing request line".to_string());
@@ -984,27 +1007,40 @@ fn parse_http_request(data: &[u8]) -> Result<(String, String, u16), String> {
     let method = String::from_utf8_lossy(parts[0]).to_string();
     let url = String::from_utf8_lossy(parts[1]).to_string();
 
-    if method == "CONNECT" {
-        let hp: Vec<&str> = url.split(':').collect();
-        let host = hp.get(0).unwrap_or(&"").to_string();
-        let port = hp.get(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(443);
-        return Ok((method, host, port));
-    }
-
-    let mut host_header = None;
+    let mut parsed_headers: Vec<(String, String)> = Vec::new();
     for line in headers.iter().skip(1) {
-        if line.starts_with(b"Host:") {
-            host_header = Some(line);
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
             break;
         }
+        if let Some(pos) = line.iter().position(|b| *b == b':') {
+            let (k, v) = line.split_at(pos);
+            let v = &v[1..];
+            let key = String::from_utf8_lossy(k).trim().to_lowercase();
+            let value = String::from_utf8_lossy(v).trim().to_string();
+            parsed_headers.push((key, value));
+        }
     }
-    let host_header = host_header.ok_or_else(|| "Missing Host header".to_string())?;
-    let host_value = String::from_utf8_lossy(&host_header[5..]).trim().to_string();
-    let hp: Vec<&str> = host_value.split(':').collect();
-    let host = hp.get(0).unwrap_or(&"").to_string();
-    let port = hp.get(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(80);
 
-    Ok((method, host, port))
+    if method == "CONNECT" {
+        let (host, port) = parse_host_port(&url, 443);
+        if host.is_empty() {
+            return Err("Invalid CONNECT host".to_string());
+        }
+        return Ok((method, host, port, parsed_headers));
+    }
+
+    let host_value = parsed_headers
+        .iter()
+        .find(|(k, _)| k == "host")
+        .map(|(_, v)| v.clone())
+        .ok_or_else(|| "Missing Host header".to_string())?;
+    let (host, port) = parse_host_port(&host_value, 80);
+    if host.is_empty() {
+        return Err("Invalid Host header".to_string());
+    }
+
+    Ok((method, host, port, parsed_headers))
 }
 
 fn extract_sni_position(data: &[u8]) -> Option<(usize, usize)> {
@@ -1057,7 +1093,7 @@ fn fragment_random(data: &[u8]) -> Vec<u8> {
     out
 }
 
-fn fragment_sni(data: &[u8]) -> Vec<u8> {
+fn fragment_sni(data: &[u8]) -> Option<Vec<u8>> {
     let mut parts: Vec<Vec<u8>> = Vec::new();
     if let Some((start, end)) = extract_sni_position(data) {
         let part_start = &data[..start];
@@ -1099,7 +1135,86 @@ fn fragment_sni(data: &[u8]) -> Vec<u8> {
         );
     }
 
-    parts.concat()
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.concat())
+    }
+}
+
+fn parse_host_port(value: &str, default_port: u16) -> (String, u16) {
+    let v = value.trim();
+    if v.starts_with('[') {
+        if let Some(end) = v.find(']') {
+            let host = &v[1..end];
+            let mut port = default_port;
+            let rest = &v[end + 1..];
+            if let Some(p) = rest.strip_prefix(':') {
+                if let Ok(n) = p.parse::<u16>() {
+                    port = n;
+                }
+            }
+            return (host.to_string(), port);
+        }
+    }
+
+    let colon_count = v.chars().filter(|c| *c == ':').count();
+    if colon_count == 0 {
+        return (v.to_string(), default_port);
+    }
+    if colon_count == 1 {
+        let mut it = v.rsplitn(2, ':');
+        let port_str = it.next().unwrap_or("");
+        let host = it.next().unwrap_or("");
+        let port = port_str.parse::<u16>().unwrap_or(default_port);
+        return (host.to_string(), port);
+    }
+
+    // Likely raw IPv6 without brackets; no reliable port parsing.
+    (v.to_string(), default_port)
+}
+
+fn is_auth_ok(config: &Config, headers: &[(String, String)]) -> bool {
+    let auth_enabled = config.users_file.is_some()
+        || (config.auth_user.is_some() && config.auth_pass.is_some());
+    if !auth_enabled {
+        return true;
+    }
+    let header = headers
+        .iter()
+        .find(|(k, _)| k == "proxy-authorization")
+        .map(|(_, v)| v.as_str());
+    let Some(value) = header else {
+        return false;
+    };
+    let value = value.trim();
+    let basic_prefix = "basic ";
+    if !value.to_ascii_lowercase().starts_with(basic_prefix) {
+        return false;
+    }
+    let b64 = value[basic_prefix.len()..].trim();
+    let decoded = STANDARD.decode(b64).ok();
+    let Some(decoded) = decoded else {
+        return false;
+    };
+    let decoded = String::from_utf8_lossy(&decoded);
+    let mut it = decoded.splitn(2, ':');
+    let Some(u) = it.next() else {
+        return false;
+    };
+    let Some(p) = it.next() else {
+        return false;
+    };
+
+    if let Some(users) = &config.users {
+        let hashed = hash_password(p);
+        return users.get(u).map(|v| v == &hashed).unwrap_or(false);
+    }
+
+    let (Some(user), Some(pass)) = (&config.auth_user, &config.auth_pass) else {
+        return false;
+    };
+    u == user && p == pass
 }
 
 fn is_domain_blocked(blocked: &[String], domain_matching: DomainMatching, domain: &str) -> bool {
@@ -1254,6 +1369,12 @@ fn parse_args() -> Result<Args, String> {
     let mut install = false;
     let mut uninstall = false;
     let mut blacklist_set = false;
+    let mut auth_user: Option<String> = None;
+    let mut auth_pass: Option<String> = None;
+    let mut check_updates = false;
+    let mut users_file: Option<String> = None;
+    let mut add_user: Option<String> = None;
+    let mut add_pass: Option<String> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -1321,6 +1442,34 @@ fn parse_args() -> Result<Args, String> {
                     log_error = Some(v);
                 }
             }
+            "--auth-user" | "--auth_user" => {
+                if let Some(v) = take_value(&args, &mut i, inline_value) {
+                    auth_user = Some(v);
+                }
+            }
+            "--auth-pass" | "--auth_pass" => {
+                if let Some(v) = take_value(&args, &mut i, inline_value) {
+                    auth_pass = Some(v);
+                }
+            }
+            "--users-file" | "--users_file" => {
+                if let Some(v) = take_value(&args, &mut i, inline_value) {
+                    users_file = Some(v);
+                }
+            }
+            "--add-user" | "--add_user" => {
+                if let Some(v) = take_value(&args, &mut i, inline_value) {
+                    add_user = Some(v);
+                }
+            }
+            "--add-pass" | "--add_pass" => {
+                if let Some(v) = take_value(&args, &mut i, inline_value) {
+                    add_pass = Some(v);
+                }
+            }
+            "--check-updates" => {
+                check_updates = true;
+            }
             "-q" | "--quiet" => {
                 quiet = true;
             }
@@ -1346,6 +1495,12 @@ fn parse_args() -> Result<Args, String> {
     if install && uninstall {
         return Err("error: argument --install: not allowed with --uninstall".to_string());
     }
+    if auth_user.is_some() != auth_pass.is_some() {
+        return Err("error: --auth-user requires --auth-pass (and vice versa)".to_string());
+    }
+    if add_user.is_some() != add_pass.is_some() {
+        return Err("error: --add-user requires --add-pass (and vice versa)".to_string());
+    }
 
     Ok(Args {
         config: Config {
@@ -1360,9 +1515,16 @@ fn parse_args() -> Result<Args, String> {
             no_blacklist,
             auto_blacklist,
             quiet,
+            auth_user,
+            auth_pass,
+            check_updates,
+            users_file,
+            users: None,
         },
         install,
         uninstall,
+        add_user,
+        add_pass,
     })
 }
 
@@ -1474,6 +1636,24 @@ async fn main() {
         }
     };
 
+    if let (Some(user), Some(pass)) = (&args.add_user, &args.add_pass) {
+        let path = args
+            .config
+            .users_file
+            .clone()
+            .unwrap_or_else(|| "users.txt".to_string());
+        match add_user_to_file(&path, user, pass) {
+            Ok(()) => {
+                println!("\x1b[92m[INFO]:\x1b[97m User '{}' added/updated in {}", user, path);
+            }
+            Err(err) => {
+                eprintln!("\x1b[91m[ERROR]:\x1b[97m {}", err);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if args.install || args.uninstall {
         if let Err(err) = manage_autostart(args.install) {
             eprintln!("\x1b[91m[ERROR]:\x1b[97m {}", err);
@@ -1509,7 +1689,24 @@ async fn main() {
         }
     };
 
-    let proxy = ProxyServer::new(args.config, blacklist_manager, statistics, logger);
+    let mut config = args.config;
+    if let Some(path) = &config.users_file {
+        match load_users(path) {
+            Ok(users) => {
+                if users.is_empty() {
+                    logger.error("\x1b[91m[ERROR]: Users file is empty. Add users or remove --users-file\x1b[0m");
+                    return;
+                }
+                config.users = Some(Arc::new(users));
+            }
+            Err(err) => {
+                logger.error(&format!("\x1b[91m[ERROR]: Failed to load users: {}\x1b[0m", err));
+                return;
+            }
+        }
+    }
+
+    let proxy = ProxyServer::new(config, blacklist_manager, statistics, logger);
 
     let shutdown = proxy.shutdown.clone();
     tokio::spawn(async move {
@@ -1544,26 +1741,98 @@ fn create_blacklist_manager(config: &Config) -> io::Result<BlacklistManager> {
     })
 }
 
+fn hash_password(pass: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(pass.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
+}
+
+fn load_users(path: &str) -> io::Result<HashMap<String, String>> {
+    if !Path::new(path).exists() {
+        return Ok(HashMap::new());
+    }
+    let data = fs::read_to_string(path)?;
+    let mut users = HashMap::new();
+    for line in data.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.splitn(2, ':');
+        let user = it.next().unwrap_or("").trim();
+        let hash = it.next().unwrap_or("").trim();
+        if !user.is_empty() && !hash.is_empty() {
+            users.insert(user.to_string(), hash.to_string());
+        }
+    }
+    Ok(users)
+}
+
+fn add_user_to_file(path: &str, user: &str, pass: &str) -> io::Result<()> {
+    let mut users = load_users(path)?;
+    users.insert(user.to_string(), hash_password(pass));
+    let mut lines: Vec<String> = users
+        .into_iter()
+        .map(|(u, h)| format!("{}:{}", u, h))
+        .collect();
+    lines.sort();
+    let mut content = String::new();
+    for line in lines {
+        content.push_str(&line);
+        content.push('\n');
+    }
+    fs::write(path, content)
+}
+
 trait LeftJustify {
-    fn ljust(&self, width: usize) -> String;
+    fn pad_ansi(&self, width: usize) -> String;
 }
 
 impl LeftJustify for String {
-    fn ljust(&self, width: usize) -> String {
-        let mut s = self.clone();
-        if s.len() < width {
-            s.push_str(&" ".repeat(width - s.len()));
-        }
-        s
+    fn pad_ansi(&self, width: usize) -> String {
+        pad_ansi(self, width)
     }
 }
 
 impl LeftJustify for &str {
-    fn ljust(&self, width: usize) -> String {
-        let mut s = self.to_string();
-        if s.len() < width {
-            s.push_str(&" ".repeat(width - s.len()));
-        }
-        s
+    fn pad_ansi(&self, width: usize) -> String {
+        pad_ansi(self, width)
     }
+}
+
+fn pad_ansi(s: &str, width: usize) -> String {
+    let visible = visible_len_ansi(s);
+    if visible >= width {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + (width - visible));
+    out.push_str(s);
+    out.push_str(&" ".repeat(width - visible));
+    out
+}
+
+fn visible_len_ansi(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut count = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'm' {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        count += 1;
+        i += 1;
+    }
+    count
 }
