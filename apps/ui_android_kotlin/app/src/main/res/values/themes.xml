@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.NoDPI" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="colorPrimary">@color/ink_900</item>
+        <item name="colorPrimaryVariant">@color/ink_900</item>
+        <item name="colorSecondary">@color/accent_orange</item>
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>

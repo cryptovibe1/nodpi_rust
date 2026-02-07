@@ -1,0 +1,8 @@
+<resources>
+    <color name="ink_900">#1D3B50</color>
+    <color name="ink_700">#425466</color>
+    <color name="ink_600">#52606D</color>
+    <color name="ink_500">#748094</color>
+    <color name="ink_50">#F9F6EF</color>
+    <color name="accent_orange">#E76F51</color>
+</resources>
