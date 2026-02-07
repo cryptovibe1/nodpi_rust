@@ -14,11 +14,12 @@ import java.io.File
 
 class ServerService : Service() {
     companion object {
-        private const val channelId = "nodpi_server"
+        private const val channelId = "nodpi_server_v2"
         private const val channelName = "NoDPI Server"
         private const val notificationId = 1001
         private const val actionStart = "com.nodpi.android.action.START"
         private const val actionStop = "com.nodpi.android.action.STOP"
+        private const val actionRestart = "com.nodpi.android.action.RESTART"
 
         @Volatile
         private var running: Boolean = false
@@ -37,11 +38,23 @@ class ServerService : Service() {
             context.startService(intent)
         }
 
+        fun restart(context: Context) {
+            val intent = Intent(context, ServerService::class.java).setAction(actionRestart)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
         fun isRunning(): Boolean = running
     }
 
     private lateinit var serverManager: ServerManager
     private lateinit var configStore: ConfigStore
+    @Volatile
+    private var monitorActive = false
+    private val monitorLock = Any()
 
     override fun onCreate() {
         super.onCreate()
@@ -50,21 +63,20 @@ class ServerService : Service() {
         configStore = ConfigStore(rootDir)
         serverManager = ServerManager(this, rootDir, configStore, execDir)
         ensureChannel()
+        startForeground(notificationId, buildNotification("Server stopped", false, false, configStore.load()))
+        ensureMonitor()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             actionStart -> {
-                startForeground(notificationId, buildNotification("Starting server", false, true))
+                startForeground(notificationId, buildNotification("Starting server", false, true, configStore.load()))
                 Thread {
                     val config = configStore.load()
                     val result = serverManager.start(config)
                     LogStore.append("[info] service start: ${result.message}")
                     running = result.success && serverManager.isRunning()
-                    updateNotification(if (running) "Server running" else "Start failed", running, false)
-                    if (!running) {
-                        stopSelf()
-                    }
+                    updateNotification(if (running) "Server running" else "Start failed", running, false, config)
                 }.start()
             }
             actionStop -> {
@@ -72,9 +84,18 @@ class ServerService : Service() {
                     val result = serverManager.stop()
                     LogStore.append("[info] service stop: ${result.message}")
                     running = false
-                    updateNotification("Server stopped", false, false)
-                    stopForeground(true)
-                    stopSelf()
+                    updateNotification("Server stopped", false, false, configStore.load())
+                }.start()
+            }
+            actionRestart -> {
+                Thread {
+                    val config = configStore.load()
+                    updateNotification("Restarting server", running, true, config)
+                    serverManager.stop()
+                    val result = serverManager.start(config)
+                    LogStore.append("[info] service restart: ${result.message}")
+                    running = result.success && serverManager.isRunning()
+                    updateNotification(if (running) "Server running" else "Restart failed", running, false, config)
                 }.start()
             }
         }
@@ -83,6 +104,7 @@ class ServerService : Service() {
 
     override fun onDestroy() {
         running = false
+        monitorActive = false
         super.onDestroy()
     }
 
@@ -91,16 +113,17 @@ class ServerService : Service() {
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        val channel = NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_LOW)
+        val channel = NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_DEFAULT)
+        channel.description = "Server control panel"
         manager.createNotificationChannel(channel)
     }
 
-    private fun updateNotification(message: String, isRunning: Boolean, showProgress: Boolean) {
+    private fun updateNotification(message: String, isRunning: Boolean, showProgress: Boolean, config: ProxyConfig) {
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(notificationId, buildNotification(message, isRunning, showProgress))
+        manager.notify(notificationId, buildNotification(message, isRunning, showProgress, config))
     }
 
-    private fun buildNotification(message: String, isRunning: Boolean, showProgress: Boolean): Notification {
+    private fun buildNotification(message: String, isRunning: Boolean, showProgress: Boolean, config: ProxyConfig): Notification {
         val openIntent = PendingIntent.getActivity(
             this,
             0,
@@ -113,26 +136,70 @@ class ServerService : Service() {
             Intent(this, ServerService::class.java).setAction(actionStop),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val startIntent = PendingIntent.getService(
+            this,
+            2,
+            Intent(this, ServerService::class.java).setAction(actionStart),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val restartIntent = PendingIntent.getService(
+            this,
+            3,
+            Intent(this, ServerService::class.java).setAction(actionRestart),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val statusText = if (isRunning) "Running" else "Stopped"
+        val endpoint = "${config.host}:${config.port}"
         val builder = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentTitle("NoDPI Server")
-            .setContentText("Status: $statusText")
-            .setSubText(statusText)
+            .setContentText("Status: $statusText · $endpoint")
+            .setSubText(endpoint)
             .setStyle(
                 NotificationCompat.BigTextStyle()
                     .setBigContentTitle("NoDPI Server")
-                    .bigText("Status: $statusText\n$message")
+                    .bigText("Status: $statusText\nEndpoint: $endpoint\n$message")
             )
             .setContentIntent(openIntent)
-            .setOngoing(isRunning)
+            .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setShowWhen(false)
         if (showProgress) {
             builder.setProgress(0, 0, true)
         }
         if (isRunning) {
             builder.addAction(0, "Stop", stopIntent)
+            builder.addAction(0, "Restart", restartIntent)
+        } else {
+            builder.addAction(0, "Start", startIntent)
         }
         return builder.build()
+    }
+
+    private fun ensureMonitor() {
+        synchronized(monitorLock) {
+            if (monitorActive) return
+            monitorActive = true
+            Thread {
+                while (monitorActive) {
+                    val config = configStore.load()
+                    val nowRunning = serverManager.isRunning()
+                    if (nowRunning != running) {
+                        running = nowRunning
+                        updateNotification(
+                            if (running) "Server running" else "Server stopped",
+                            running,
+                            false,
+                            config
+                        )
+                    }
+                    Thread.sleep(2000)
+                }
+            }.start()
+        }
     }
 }
