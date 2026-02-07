@@ -2,6 +2,7 @@ package com.nodpi.android
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -10,6 +11,8 @@ import android.widget.EditText
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.snackbar.Snackbar
 import com.google.android.material.R as MaterialR
@@ -58,6 +61,7 @@ class MainActivity : AppCompatActivity() {
         blacklistStore = BlacklistStore(rootDir, configStore, AssetInstaller(this, rootDir, File(codeCacheDir, "nodpi_bin")))
 
         bindViews()
+        requestNotificationsPermissionIfNeeded()
         setupSpinners()
         setupButtons()
         setupMutualExclusion()
@@ -88,6 +92,15 @@ class MainActivity : AppCompatActivity() {
         buttonCopyDebug = findViewById(R.id.button_copy_debug)
         debugLogs = findViewById(R.id.debug_logs)
         buttonClearLogs = findViewById(R.id.button_clear_logs)
+    }
+
+    private fun requestNotificationsPermissionIfNeeded() {
+        if (android.os.Build.VERSION.SDK_INT < 33) return
+        val permission = android.Manifest.permission.POST_NOTIFICATIONS
+        if (ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+        ActivityCompat.requestPermissions(this, arrayOf(permission), 1001)
     }
 
     private fun setupSpinners() {
