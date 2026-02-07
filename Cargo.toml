@@ -1,16 +1,8 @@
-[package]
-name = "nodpi_rust"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-rand = "0.8"
-tokio = { version = "1.36", features = ["full"] }
-chrono = "0.4"
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
-serde_json = "1.0"
-base64 = "0.22"
-sha2 = "0.10"
-
-# [target.'cfg(windows)'.dependencies]
-# winreg = "0.52"
+[workspace]
+resolver = "2"
+members = [
+    "apps/server_rust",
+    # "apps/ui_desktop_dioxus",
+    # "apps/ui_shared_dioxus",
+    # "apps/ui_android_dioxus",
+]
