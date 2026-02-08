@@ -7,6 +7,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.app.PendingIntent
+import android.net.TrafficStats
+import android.os.Process
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -55,6 +57,11 @@ class ServerService : Service() {
     @Volatile
     private var monitorActive = false
     private val monitorLock = Any()
+    private var lastRx: Long = -1
+    private var lastTx: Long = -1
+    private var lastTimeMs: Long = 0
+    @Volatile
+    private var trafficSummary: String = "Traffic: n/a"
 
     override fun onCreate() {
         super.onCreate()
@@ -158,7 +165,7 @@ class ServerService : Service() {
             .setStyle(
                 NotificationCompat.BigTextStyle()
                     .setBigContentTitle("NoDPI Server")
-                    .bigText("Status: $statusText\nEndpoint: $endpoint\n$message")
+                    .bigText("Status: $statusText\nEndpoint: $endpoint\n${trafficSummary}\n$message")
             )
             .setContentIntent(openIntent)
             .setOngoing(true)
@@ -197,9 +204,49 @@ class ServerService : Service() {
                             config
                         )
                     }
+                    updateTrafficSummary()
+                    updateNotification(
+                        if (running) "Server running" else "Server stopped",
+                        running,
+                        false,
+                        config
+                    )
                     Thread.sleep(2000)
                 }
             }.start()
         }
+    }
+
+    private fun updateTrafficSummary() {
+        val uid = Process.myUid()
+        val rx = TrafficStats.getUidRxBytes(uid)
+        val tx = TrafficStats.getUidTxBytes(uid)
+        if (rx < 0 || tx < 0) {
+            trafficSummary = "Traffic: n/a"
+            return
+        }
+        val now = System.currentTimeMillis()
+        val rate = if (lastTimeMs > 0) (now - lastTimeMs).coerceAtLeast(1) else 0
+        val deltaRx = if (lastRx >= 0) rx - lastRx else 0
+        val deltaTx = if (lastTx >= 0) tx - lastTx else 0
+        val speedIn = if (rate > 0) deltaRx * 1000 / rate else 0
+        val speedOut = if (rate > 0) deltaTx * 1000 / rate else 0
+        trafficSummary = "Traffic: RX ${formatBytes(rx)} (" +
+            "${formatBytes(speedIn)}/s), TX ${formatBytes(tx)} (" +
+            "${formatBytes(speedOut)}/s)"
+        lastRx = rx
+        lastTx = tx
+        lastTimeMs = now
+    }
+
+    private fun formatBytes(value: Long): String {
+        val units = arrayOf("B", "KB", "MB", "GB")
+        var size = value.toDouble()
+        var unit = 0
+        while (size >= 1024.0 && unit < units.lastIndex) {
+            size /= 1024.0
+            unit += 1
+        }
+        return String.format("%.1f %s", size, units[unit])
     }
 }

@@ -21,6 +21,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlinx.coroutines.Job
 
 class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
@@ -49,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var configStore: ConfigStore
     private lateinit var blacklistStore: BlacklistStore
     private lateinit var rootDir: File
+    private var statusJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,7 +73,18 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         LogStore.removeListener(logListener)
+        statusJob?.cancel()
         super.onDestroy()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        startStatusAutoRefresh()
+    }
+
+    override fun onStop() {
+        statusJob?.cancel()
+        super.onStop()
     }
 
     private fun bindViews() {
@@ -120,9 +133,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupButtons() {
-        findViewById<Button>(R.id.button_refresh).setOnClickListener {
-            refreshStatus()
-        }
         findViewById<Button>(R.id.button_save_config).setOnClickListener {
             saveConfig(showMessage = true)
         }
@@ -233,6 +243,16 @@ class MainActivity : AppCompatActivity() {
         val running = ServerService.isRunning()
         val status = if (running) "Running" else "Stopped"
         statusText.text = status
+    }
+
+    private fun startStatusAutoRefresh() {
+        if (statusJob?.isActive == true) return
+        statusJob = lifecycleScope.launch {
+            while (true) {
+                refreshStatus()
+                delay(1000)
+            }
+        }
     }
 
     private fun applyConfigToUi(config: ProxyConfig) {
