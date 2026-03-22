@@ -21,10 +21,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import kotlinx.coroutines.Job
 
 class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
+    private lateinit var localIpText: TextView
     private lateinit var inputHost: EditText
     private lateinit var inputPort: EditText
     private lateinit var inputBlacklistFile: EditText
@@ -89,6 +92,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun bindViews() {
         statusText = findViewById(R.id.status_text)
+        localIpText = findViewById(R.id.local_ip_text)
         inputHost = findViewById(R.id.input_host)
         inputPort = findViewById(R.id.input_port)
         inputBlacklistFile = findViewById(R.id.input_blacklist_file)
@@ -208,6 +212,7 @@ class MainActivity : AppCompatActivity() {
             inputBlacklist.setText(blacklist)
             updateDebugTree()
             debugLogs.text = LogStore.get().ifBlank { "(no logs yet)" }
+            refreshLocalIps()
             refreshStatus()
         }
     }
@@ -243,6 +248,33 @@ class MainActivity : AppCompatActivity() {
         val running = ServerService.isRunning()
         val status = if (running) "Running" else "Stopped"
         statusText.text = status
+    }
+
+    private fun refreshLocalIps() {
+        localIpText.text = getLocalIpSummary()
+    }
+
+    private fun getLocalIpSummary(): String {
+        val entries = try {
+            NetworkInterface.getNetworkInterfaces()
+                ?.toList()
+                .orEmpty()
+                .asSequence()
+                .filter { it.isUp && !it.isLoopback }
+                .flatMap { iface ->
+                    iface.inetAddresses
+                        .toList()
+                        .asSequence()
+                        .filterIsInstance<Inet4Address>()
+                        .filterNot { it.isLoopbackAddress || it.isLinkLocalAddress }
+                        .map { address -> "${iface.name}: ${address.hostAddress}" }
+                }
+                .toList()
+        } catch (_: Exception) {
+            emptyList()
+        }
+
+        return entries.distinct().ifEmpty { listOf("Unavailable") }.joinToString("\n")
     }
 
     private fun startStatusAutoRefresh() {
