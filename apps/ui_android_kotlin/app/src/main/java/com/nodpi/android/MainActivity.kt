@@ -9,6 +9,7 @@ import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.Spinner
+import android.widget.AdapterView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -26,6 +27,8 @@ import java.net.NetworkInterface
 import kotlinx.coroutines.Job
 
 class MainActivity : AppCompatActivity() {
+    private data class OutHostOption(val label: String, val host: String?)
+
     private lateinit var statusText: TextView
     private lateinit var localIpText: TextView
     private lateinit var inputHost: EditText
@@ -37,6 +40,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var inputBlacklist: EditText
     private lateinit var spinnerFragment: Spinner
     private lateinit var spinnerDomain: Spinner
+    private lateinit var spinnerOutHost: Spinner
     private lateinit var checkboxNoBlacklist: CheckBox
     private lateinit var checkboxAutoBlacklist: CheckBox
     private lateinit var checkboxQuiet: CheckBox
@@ -54,6 +58,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var blacklistStore: BlacklistStore
     private lateinit var rootDir: File
     private var statusJob: Job? = null
+    private lateinit var outHostAdapter: ArrayAdapter<String>
+    private var outHostOptions: List<OutHostOption> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -102,6 +108,7 @@ class MainActivity : AppCompatActivity() {
         inputBlacklist = findViewById(R.id.input_blacklist)
         spinnerFragment = findViewById(R.id.spinner_fragment)
         spinnerDomain = findViewById(R.id.spinner_domain)
+        spinnerOutHost = findViewById(R.id.spinner_out_host)
         checkboxNoBlacklist = findViewById(R.id.checkbox_no_blacklist)
         checkboxAutoBlacklist = findViewById(R.id.checkbox_auto_blacklist)
         checkboxQuiet = findViewById(R.id.checkbox_quiet)
@@ -134,6 +141,20 @@ class MainActivity : AppCompatActivity() {
             android.R.layout.simple_spinner_dropdown_item,
             domainItems
         )
+        outHostAdapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            mutableListOf("None")
+        )
+        spinnerOutHost.adapter = outHostAdapter
+        spinnerOutHost.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                val option = outHostOptions.getOrNull(position) ?: return
+                inputOutHost.setText(option.host.orEmpty())
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
     }
 
     private fun setupButtons() {
@@ -248,13 +269,24 @@ class MainActivity : AppCompatActivity() {
         val running = ServerService.isRunning()
         val status = if (running) "Running" else "Stopped"
         statusText.text = status
+        refreshLocalNetworkInfo()
     }
 
     private fun refreshLocalIps() {
-        localIpText.text = getLocalIpSummary()
+        localIpText.text = getLocalIpSummary(outHostOptions)
     }
 
-    private fun getLocalIpSummary(): String {
+    private fun refreshLocalNetworkInfo() {
+        val currentOutHost = inputOutHost.text?.toString().orEmpty().trim().ifBlank { null }
+        outHostOptions = getOutHostOptions(currentOutHost)
+        outHostAdapter.clear()
+        outHostAdapter.addAll(outHostOptions.map { it.label })
+        outHostAdapter.notifyDataSetChanged()
+        refreshLocalIps()
+        syncOutHostSelection()
+    }
+
+    private fun getOutHostOptions(currentOutHost: String?): List<OutHostOption> {
         val entries = try {
             NetworkInterface.getNetworkInterfaces()
                 ?.toList()
@@ -267,14 +299,46 @@ class MainActivity : AppCompatActivity() {
                         .asSequence()
                         .filterIsInstance<Inet4Address>()
                         .filterNot { it.isLoopbackAddress || it.isLinkLocalAddress }
-                        .map { address -> "${iface.name}: ${address.hostAddress}" }
+                        .map { address ->
+                            OutHostOption(
+                                label = "${iface.name}: ${address.hostAddress}",
+                                host = address.hostAddress
+                            )
+                        }
                 }
                 .toList()
         } catch (_: Exception) {
             emptyList()
         }
 
-        return entries.distinct().ifEmpty { listOf("Unavailable") }.joinToString("\n")
+        val options = mutableListOf(OutHostOption("None", null))
+        currentOutHost
+            ?.takeIf { current -> entries.none { it.host == current } }
+            ?.let { current -> options += OutHostOption("Custom: $current", current) }
+        options += entries.distinctBy { it.label }
+        return options
+    }
+
+    private fun getLocalIpSummary(options: List<OutHostOption>): String {
+        return options
+            .mapNotNull { option -> option.host?.let { option.label } }
+            .ifEmpty { listOf("Unavailable") }
+            .joinToString("\n")
+    }
+
+    private fun syncOutHostSelection() {
+        val current = inputOutHost.text?.toString().orEmpty().trim()
+        val selectedIndex = outHostOptions.indexOfFirst { option ->
+            if (current.isBlank()) {
+                option.host == null
+            } else {
+                option.host == current
+            }
+        }.takeIf { it >= 0 } ?: 0
+
+        if (spinnerOutHost.selectedItemPosition != selectedIndex) {
+            spinnerOutHost.setSelection(selectedIndex)
+        }
     }
 
     private fun startStatusAutoRefresh() {
